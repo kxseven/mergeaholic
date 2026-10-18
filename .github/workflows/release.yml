@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-master
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Create or update release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          target-branch: master
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  release-binaries:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            format: tar.gz
+          - goos: linux
+            goarch: arm64
+            format: tar.gz
+          - goos: darwin
+            goarch: amd64
+            format: tar.gz
+          - goos: darwin
+            goarch: arm64
+            format: tar.gz
+          - goos: windows
+            goarch: amd64
+            format: zip
+          - goos: windows
+            goarch: arm64
+            format: zip
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.release-please.outputs.version }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          binary="mergeaholic"
+          if [[ "$GOOS" == "windows" ]]; then
+            binary="${binary}.exe"
+          fi
+
+          archive="mergeaholic_${VERSION}_${GOOS}_${GOARCH}.${FORMAT}"
+          go build -trimpath -ldflags="-s -w" -o "dist/${binary}" .
+
+          if [[ "$FORMAT" == "zip" ]]; then
+            (cd dist && zip "$archive" "$binary")
+          else
+            tar -C dist -czf "dist/${archive}" "$binary"
+          fi
+
+          (cd dist && sha256sum "$archive" > "${archive}.sha256")
+          rm "dist/${binary}"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG_NAME" dist/* --clobber
