@@ -1,26 +1,16 @@
 # mergeaholic
 
-`mergeaholic` is a standalone Go CLI for deep-merging JSON, JSONC, or YAML
-configuration files.
+`mergeaholic` is a standalone Go CLI for deep-merging JSON, JSONC, or YAML configuration files.
 
-Files are listed from the bottom layer to the top layer. Later files take
-precedence:
+Files are listed from the bottom layer to the top layer. Later files take precedence:
 
 - objects/maps merge recursively;
 - arrays/lists are replaced by the higher layer;
 - scalar values and explicit `null` values replace lower-layer values.
 
-JSON (`.json`, `.jsonc`) and YAML (`.yml`, `.yaml`) belong to separate format
-families and cannot be mixed in one invocation. JSONC comments and trailing
-commas are accepted, but output is ordinary formatted JSON without comments.
-
-## Build
-
-Go 1.22 or newer is required.
-
-```sh
-go build -o mergeaholic .
-```
+JSON (`.json`, `.jsonc`) and YAML (`.yml`, `.yaml`) belong to separate format families and cannot
+be mixed in one invocation. JSONC comments and trailing commas are accepted, but output is ordinary
+formatted JSON without comments.
 
 ## Usage
 
@@ -82,6 +72,14 @@ service:
   port: 80
 tags:
   - production
+```
+
+## Build
+
+Go 1.22 or newer is required.
+
+```sh
+go build -o mergeaholic .
 ```
 
 ## Test
