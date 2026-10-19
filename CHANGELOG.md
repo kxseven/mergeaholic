@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/kxseven/mergeaholic/compare/mergeaholic-v0.2.0...mergeaholic-v0.2.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* Docs change to trigger release ([7521843](https://github.com/kxseven/mergeaholic/commit/7521843fa63c88aa7a9e988330d537e1273661e2))
+* Docs change to trigger release ([d4e3aa4](https://github.com/kxseven/mergeaholic/commit/d4e3aa4c0209150d79fa3e25ccc0d84c25915a76))
+
 ## [0.2.0](https://github.com/kxseven/mergeaholic/compare/mergeaholic-v0.1.0...mergeaholic-v0.2.0) (2026-10-19)
 
 
