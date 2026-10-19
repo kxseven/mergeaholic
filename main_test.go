@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,6 +174,128 @@ func TestExecuteYAMLToFile(t *testing.T) {
 	if string(data) != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", data, want)
 	}
+}
+
+func TestArrayFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		mode arrayMode
+		err  string
+	}{
+		{args: []string{"base.json", "top.json"}, mode: arrayReplace},
+		{args: []string{"-ar", "base.json", "top.json"}, mode: arrayReplace},
+		{args: []string{"base.json", "-au", "top.json", "-o", "out.json"}, mode: arrayUnion},
+		{args: []string{"-au", "-ar", "base.json", "top.json"}, err: "mutually exclusive"},
+		{args: []string{"-ar", "-au", "base.json", "top.json"}, err: "mutually exclusive"},
+	} {
+		opts, err := parseArgs(tc.args)
+		if tc.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Fatalf("%v: got %v, want %q", tc.args, err, tc.err)
+			}
+			continue
+		}
+		if err != nil || opts.arrayMode != tc.mode {
+			t.Fatalf("%v: opts=%+v, err=%v", tc.args, opts, err)
+		}
+	}
+	for _, flag := range []string{"-au", "-ar"} {
+		if !strings.Contains(usage, flag) {
+			t.Fatalf("help missing %s", flag)
+		}
+	}
+}
+
+func TestArrayUnionAcrossLayers(t *testing.T) {
+	layers := []any{
+		map[string]any{"items": []any{json.Number("1"), "x", json.Number("1.0")}, "nested": map[string]any{"items": []any{map[string]any{"a": 1, "b": []any{1, 2}}, nil}}},
+		map[string]any{"items": []any{"x", true, json.Number("1e0")}, "nested": map[string]any{"items": []any{nil, map[string]any{"b": []any{1, 2}, "a": 1}, "new"}}},
+		map[string]any{"items": []any{false, true, "x"}, "nested": map[string]any{"items": []any{"new", []any{1, 1, 2}, []any{1, 2}}}},
+	}
+	var merged any
+	for _, layer := range layers {
+		merged = mergeWithMode(merged, layer, arrayUnion)
+	}
+	want := map[string]any{
+		"items":  []any{json.Number("1"), "x", true, false},
+		"nested": map[string]any{"items": []any{map[string]any{"a": 1, "b": []any{1, 2}}, nil, "new", []any{1, 2}}},
+	}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("union = %#v, want %#v", merged, want)
+	}
+}
+
+func TestArrayModesAndOverrides(t *testing.T) {
+	lower := map[string]any{"items": []any{1, 1}, "keep": map[string]any{"value": "old"}, "gone": []any{1}}
+	higher := map[string]any{"items": []any{}, "keep": map[string]any{"extra": true}, "gone": nil, "new": []any{2, 2}}
+	for _, mode := range []arrayMode{arrayReplace, arrayUnion} {
+		got := mergeWithMode(lower, higher, mode).(map[string]any)
+		if len(got["items"].([]any)) != 1 && mode == arrayUnion {
+			t.Fatalf("union should retain lower values: %#v", got)
+		}
+		if mode == arrayReplace && len(got["items"].([]any)) != 0 {
+			t.Fatalf("replace should use empty top array: %#v", got)
+		}
+		if got["gone"] != nil || got["keep"].(map[string]any)["value"] != "old" {
+			t.Fatalf("non-array rules changed: %#v", got)
+		}
+	}
+	if got := mergeWithMode([]any{1}, []any{}, arrayUnion); !reflect.DeepEqual(got, []any{1}) {
+		t.Fatalf("union with empty higher array = %#v", got)
+	}
+	if got := mergeWithMode([]any{1}, nil, arrayUnion); got != nil {
+		t.Fatalf("null override = %#v", got)
+	}
+	if sameValue("1", json.Number("1")) || sameValue(true, json.Number("1")) || sameValue(nil, false) {
+		t.Fatal("different JSON types compared equal")
+	}
+}
+
+func TestExecuteArrayModesBothFormats(t *testing.T) {
+	for _, tc := range []struct{ ext, base, top string }{
+		{"jsonc", `{"items":[1,1,{"a":2,"b":3}]}`, `{//comment\n"items":[{"b":3,"a":2},2,],}`},
+		{"yaml", "items: [1, 1, {a: 2, b: 3}]\n", "items: [{b: 3, a: 2}, 2]\n"},
+	} {
+		t.Run(tc.ext, func(t *testing.T) {
+			dir := t.TempDir()
+			base := writeTestFile(t, dir, "base."+tc.ext, tc.base)
+			topText := strings.ReplaceAll(tc.top, `\n`, "\n")
+			top := writeTestFile(t, dir, "top."+tc.ext, topText)
+			for _, mode := range []arrayMode{arrayReplace, arrayUnion} {
+				var stdout bytes.Buffer
+				out := filepath.Join(dir, "out."+tc.ext)
+				if err := execute(options{inputs: []string{base, top}, arrayMode: mode}, &stdout); err != nil {
+					t.Fatal(err)
+				}
+				if err := execute(options{inputs: []string{base, top}, output: out, arrayMode: mode}, &bytes.Buffer{}); err != nil {
+					t.Fatal(err)
+				}
+				file, err := os.ReadFile(out)
+				if err != nil || !bytes.Equal(file, stdout.Bytes()) {
+					t.Fatalf("stdout/file mismatch: %s, %v", file, err)
+				}
+				value, err := decode(file, extensionKindForTest(tc.ext), tc.ext == "jsonc")
+				if err != nil {
+					t.Fatal(err)
+				}
+				items := value.(map[string]any)["items"].([]any)
+				want := 2
+				if mode == arrayUnion {
+					want = 3
+				}
+				if len(items) != want {
+					t.Fatalf("mode %d: items = %#v", mode, items)
+				}
+			}
+		})
+	}
+}
+
+func extensionKindForTest(ext string) fileType {
+	if ext == "yaml" {
+		return typeYAML
+	}
+	return typeJSON
 }
 
 func writeTestFile(t *testing.T, dir, name, contents string) string {

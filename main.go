@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,10 +20,12 @@ const usage = `Usage: mergeaholic [options] <bottom-layer> <layer> [<top-layer> 
 
 Deep merge JSON or YAML files. Files are applied from left to right, so later
 files take precedence. Objects/maps are merged recursively; arrays/lists and
-scalar values are replaced by the higher layer.
+scalar values are replaced by the higher layer unless -au unions arrays.
 
 Options:
   -o, --output <file>  Write the result to a file instead of stdout
+  -au                  Union arrays, keeping first occurrences in order
+  -ar                  Replace arrays (default); cannot combine with -au
   -h, --help           Show this help
 `
 
@@ -31,10 +36,18 @@ const (
 	typeYAML
 )
 
+type arrayMode int
+
+const (
+	arrayReplace arrayMode = iota
+	arrayUnion
+)
+
 type options struct {
-	inputs []string
-	output string
-	help   bool
+	inputs    []string
+	output    string
+	help      bool
+	arrayMode arrayMode
 }
 
 func main() {
@@ -56,6 +69,7 @@ func main() {
 func parseArgs(args []string) (options, error) {
 	var opts options
 	positionalOnly := false
+	var unionFlag, replaceFlag bool
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -69,6 +83,12 @@ func parseArgs(args []string) (options, error) {
 			positionalOnly = true
 		case arg == "-h" || arg == "--help":
 			opts.help = true
+		case arg == "-au":
+			unionFlag = true
+			opts.arrayMode = arrayUnion
+		case arg == "-ar":
+			replaceFlag = true
+			opts.arrayMode = arrayReplace
 		case arg == "-o" || arg == "--output":
 			if i+1 >= len(args) {
 				return options{}, fmt.Errorf("%s requires a filename", arg)
@@ -90,6 +110,9 @@ func parseArgs(args []string) (options, error) {
 		}
 	}
 
+	if unionFlag && replaceFlag {
+		return options{}, errors.New("-au and -ar are mutually exclusive")
+	}
 	if opts.help {
 		return opts, nil
 	}
@@ -116,9 +139,9 @@ func execute(opts options, stdout io.Writer) error {
 			return fmt.Errorf("parse %q: %w", name, err)
 		}
 		if i == 0 {
-			merged = layer
+			merged = mergeWithMode(nil, layer, opts.arrayMode)
 		} else {
-			merged = deepMerge(merged, layer)
+			merged = mergeWithMode(merged, layer, opts.arrayMode)
 		}
 	}
 
@@ -264,24 +287,112 @@ func normalizeYAML(value any) (any, error) {
 }
 
 func deepMerge(lower, higher any) any {
-	lowerMap, lowerOK := lower.(map[string]any)
-	higherMap, higherOK := higher.(map[string]any)
-	if !lowerOK || !higherOK {
-		return higher
-	}
+	return mergeWithMode(lower, higher, arrayReplace)
+}
 
-	result := make(map[string]any, len(lowerMap)+len(higherMap))
-	for key, value := range lowerMap {
-		result[key] = value
-	}
-	for key, higherValue := range higherMap {
-		if lowerValue, exists := result[key]; exists {
-			result[key] = deepMerge(lowerValue, higherValue)
-		} else {
-			result[key] = higherValue
+func mergeWithMode(lower, higher any, mode arrayMode) any {
+	if lowerMap, ok := lower.(map[string]any); ok {
+		if higherMap, ok := higher.(map[string]any); ok {
+			result := make(map[string]any, len(lowerMap)+len(higherMap))
+			for key, value := range lowerMap {
+				result[key] = value
+			}
+			for key, value := range higherMap {
+				result[key] = mergeWithMode(result[key], value, mode)
+			}
+			return result
 		}
 	}
-	return result
+	if mode == arrayUnion {
+		if higherArray, ok := higher.([]any); ok {
+			var combined []any
+			if lowerArray, ok := lower.([]any); ok {
+				combined = append(combined, lowerArray...)
+			}
+			combined = append(combined, higherArray...)
+			result := make([]any, 0, len(combined))
+			for _, value := range combined {
+				// Normalize nested arrays even when this array is a new key or first layer.
+				value = mergeWithMode(nil, value, mode)
+				found := false
+				for _, previous := range result {
+					if sameValue(previous, value) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					result = append(result, value)
+				}
+			}
+			return result
+		}
+		if higherMap, ok := higher.(map[string]any); ok {
+			result := make(map[string]any, len(higherMap))
+			for key, value := range higherMap {
+				result[key] = mergeWithMode(nil, value, mode)
+			}
+			return result
+		}
+	}
+	return higher
+}
+
+// sameValue compares structured values, including maps irrespective of key order.
+// Numeric spellings (for example 1, 1.0, and 1e0) represent the same value.
+func sameValue(a, b any) bool {
+	if left, ok := numericValue(a); ok {
+		right, ok := numericValue(b)
+		return ok && left.Cmp(right) == 0
+	}
+	if left, ok := a.(map[string]any); ok {
+		right, ok := b.(map[string]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for key, value := range left {
+			other, exists := right[key]
+			if !exists || !sameValue(value, other) {
+				return false
+			}
+		}
+		return true
+	}
+	if left, ok := a.([]any); ok {
+		right, ok := b.([]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for i, value := range left {
+			if !sameValue(value, right[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func numericValue(value any) (*big.Rat, bool) {
+	var text string
+	switch n := value.(type) {
+	case json.Number:
+		text = string(n)
+	case int:
+		text = strconv.FormatInt(int64(n), 10)
+	case int64:
+		text = strconv.FormatInt(n, 10)
+	case uint64:
+		text = strconv.FormatUint(n, 10)
+	case float64:
+		text = strconv.FormatFloat(n, 'g', -1, 64)
+	case float32:
+		text = strconv.FormatFloat(float64(n), 'g', -1, 32)
+	default:
+		return nil, false
+	}
+	n, ok := new(big.Rat).SetString(text)
+	return n, ok
 }
 
 func encode(value any, kind fileType) ([]byte, error) {
