@@ -1,6 +1,6 @@
 # mergeaholic
 
-`mergeaholic` is a standalone Go CLI for deep-merging JSON, JSONC, or YAML configuration files.
+`mergeaholic` is a standalone CLI for deep-merging JSON, JSONC, or YAML configuration files.
 
 Files are listed from the bottom layer to the top layer. Later files take precedence:
 
